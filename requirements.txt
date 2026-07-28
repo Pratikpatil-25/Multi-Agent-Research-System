@@ -8,6 +8,12 @@ langchain-mistralai
 
 
 # ==========================
+# beautifully print on terminal
+# ==========================
+rich
+
+
+# ==========================
 # Search
 # ==========================
 tavily-python
