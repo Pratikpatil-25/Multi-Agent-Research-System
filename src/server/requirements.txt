@@ -1,0 +1,79 @@
+# ==========================
+# LLM & LangChain
+# ==========================
+langchain
+langchain-core
+langchain-community
+langchain-mistralai
+
+
+# ==========================
+# beautifully print on terminal
+# ==========================
+rich
+
+
+# ==========================
+# Search
+# ==========================
+tavily-python
+
+# ==========================
+# Web Scraping
+# ==========================
+beautifulsoup4
+lxml
+requests
+
+# ==========================
+# FastAPI Backend
+# ==========================
+fastapi
+uvicorn[standard]
+python-multipart
+
+# ==========================
+# Streamlit Frontend
+# ==========================
+streamlit
+
+# ==========================
+# Configuration
+# ==========================
+python-dotenv
+pydantic
+pydantic-settings
+
+# ==========================
+# HTTP Client
+# ==========================
+httpx
+
+# ==========================
+# Token Counting
+# ==========================
+tiktoken
+
+# ==========================
+# Utilities
+# ==========================
+typing-extensions
+orjson
+
+# ==========================
+# Logging
+# ==========================
+loguru
+
+# ==========================
+# Development
+# ==========================
+ipython
+
+# ==========================
+# Configuration
+# ==========================
+
+python-box==6.0.2
+PyYAML
+ensure==1.0.4
