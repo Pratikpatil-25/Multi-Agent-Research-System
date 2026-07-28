@@ -3,7 +3,8 @@ from tavily import TavilyClient
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
-# from logger import logger
+from logger import logger
+from config import params
 import os
 
 load_dotenv()
@@ -17,7 +18,7 @@ tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 def web_search(query : str) -> str :
     """Search the web for recent and reliable information on a topic . Returns Titles , URLs and snippets."""
 
-    results = tavily.search(query=query, max_results=3)
+    results = tavily.search(query=query, max_results=params['max_search_results'])
 
     # we need to store retrieved results
     output = []

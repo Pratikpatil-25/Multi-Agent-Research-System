@@ -69,3 +69,11 @@ loguru
 # Development
 # ==========================
 ipython
+
+# ==========================
+# Configuration
+# ==========================
+
+python-box==6.0.2
+PyYAML
+ensure==1.0.4

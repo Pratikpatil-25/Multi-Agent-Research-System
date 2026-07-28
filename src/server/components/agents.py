@@ -4,10 +4,12 @@ from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser   
 from components.tools import web_search, scrape_url
+from config import params
+
 
 load_dotenv()
 
-llm = ChatMistralAI(model_name= "mistral-small-latest", temperature = 0.1)
+llm = ChatMistralAI(model_name= params["llm_model"], temperature = params['temperature'])
 
 # Create Agents
 # 1. Search Agent
