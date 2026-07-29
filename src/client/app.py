@@ -7,10 +7,23 @@ defined in client/config.py.
 Place this file at: client/app.py
 (and .streamlit/config.toml alongside it, for the theme colors)
 Run with: streamlit run app.py
+
+UPDATED for the iterative + human-in-the-loop pipeline:
+A research run is no longer "one request, one final answer." It now goes:
+
+  1. POST /research               -> runs until it either finishes or pauses
+                                      for human review.
+  2. (if paused) show the draft + critic feedback, let a human approve or
+     request revisions.
+  3. POST /research/{id}/resume   -> sends the human's decision back in;
+                                      may pause again (another revision
+                                      round) or finish.
+
+Everything needed to keep this going lives in st.session_state - the
+thread_id ties the start call and every resume call together.
 """
 
 import html
-from urllib.parse import quote
 
 import requests
 import streamlit as st
@@ -34,10 +47,6 @@ REQUEST_TIMEOUT = 300  # seconds
 # ------------------------------------------------------------------
 # Visual identity
 # ------------------------------------------------------------------
-# Fraunces (display serif, characterful) for headings,
-# IBM Plex Sans for body copy, IBM Plex Mono for stage tags / labels
-# — a "field dossier" register that matches a pipeline of agents
-# building a file step by step.
 st.markdown(
     """
     <style>
@@ -70,6 +79,16 @@ st.markdown(
         border-radius: 4px;
         display: inline-block;
         transform: rotate(-2deg);
+    }
+
+    .case-stamp.pending {
+        border-color: #D9A63D;
+        color: #D9A63D;
+    }
+
+    .case-stamp.approved {
+        border-color: #4C9DA3;
+        color: #4C9DA3;
     }
 
     .case-title {
@@ -119,6 +138,12 @@ st.markdown(
         margin-bottom: -0.4rem;
     }
 
+    .thread-tag {
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.72rem;
+        color: #9AA3A8;
+    }
+
     .stButton > button, .stDownloadButton > button {
         font-family: 'IBM Plex Mono', monospace;
         letter-spacing: 0.04em;
@@ -144,45 +169,70 @@ def check_backend_health() -> bool:
         return False
 
 
-def run_research(topic: str) -> dict:
+def _raise_for_bad_response(resp: requests.Response):
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise ValueError(detail)
+
+
+def start_research(topic: str) -> dict:
     """
-    Calls the backend's POST /research endpoint and returns the parsed JSON response.
-    Raises requests.exceptions.RequestException on network errors,
-    or ValueError with the backend's error detail on a non-200 response.
+    Calls POST /research. Returns the RunResponse dict:
+    {"thread_id", "status", "pending_review"?, "result"?}
     """
     resp = requests.post(
         f"{API_URL}/research",
         json={"topic": topic},
         timeout=REQUEST_TIMEOUT,
     )
-    if resp.status_code != 200:
-        try:
-            detail = resp.json().get("detail", resp.text)
-        except ValueError:
-            detail = resp.text
-        raise ValueError(detail)
+    _raise_for_bad_response(resp)
     return resp.json()
 
 
-def fetch_past_research(topic: str) -> dict:
-    """Calls GET /research/{topic}. Raises ValueError with a friendly message on failure."""
-    resp = requests.get(f"{API_URL}/research/{quote(topic, safe='')}", timeout=15)
+def resume_research(thread_id: str, action: str, comments: str = None, edited_report: str = None) -> dict:
+    """
+    Calls POST /research/{thread_id}/resume with the human's decision.
+    Returns the same RunResponse shape as start_research.
+    """
+    payload = {"action": action}
+    if comments:
+        payload["comments"] = comments
+    if edited_report:
+        payload["edited_report"] = edited_report
+
+    resp = requests.post(
+        f"{API_URL}/research/{thread_id}/resume",
+        json=payload,
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_bad_response(resp)
+    return resp.json()
+
+
+def fetch_completed_case(thread_id: str) -> dict:
+    """
+    Calls GET /research/{thread_id}. Only works for runs that finished
+    (approved or hit max attempts) - the backend only stores completed
+    results, not runs still waiting on human review.
+    """
+    resp = requests.get(f"{API_URL}/research/{thread_id.strip()}", timeout=15)
     if resp.status_code == 404:
-        raise ValueError("No file exists yet for that topic.")
-    if resp.status_code != 200:
-        try:
-            detail = resp.json().get("detail", resp.text)
-        except ValueError:
-            detail = resp.text
-        raise ValueError(detail)
+        raise ValueError("No completed case found for that Case ID (it may still be pending review, or doesn't exist).")
+    _raise_for_bad_response(resp)
     return resp.json()
 
 
 # ------------------------------------------------------------------
 # Session state
 # ------------------------------------------------------------------
-if "result" not in st.session_state:
-    st.session_state.result = None
+# "run" holds the most recent RunResponse from the backend:
+#   {"thread_id": ..., "status": "interrupted" | "completed",
+#    "pending_review": {...} or None, "result": {...} or None}
+if "run" not in st.session_state:
+    st.session_state.run = None
 if "last_topic" not in st.session_state:
     st.session_state.last_topic = ""
 
@@ -206,17 +256,21 @@ with st.sidebar:
     st.divider()
     st.markdown('<div class="sidebar-eyebrow">Retrieve a Prior Case</div>', unsafe_allow_html=True)
     st.header("🗃️ Archive Lookup")
-    st.caption("Pulls a previously completed file without re-running the pipeline.")
-    lookup_topic = st.text_input("Topic to retrieve", key="lookup_topic")
+    st.caption(
+        "Pulls a previously *completed* case by its Case ID (shown at the top "
+        "of the case file once a run finishes). Cases still awaiting human "
+        "review aren't retrievable this way — keep this tab open instead."
+    )
+    lookup_id = st.text_input("Case ID (thread_id)", key="lookup_id")
     if st.button("Fetch", use_container_width=True, key="fetch_btn"):
-        if not lookup_topic.strip():
-            st.warning("Enter a topic to look up.")
+        if not lookup_id.strip():
+            st.warning("Enter a Case ID to look up.")
         else:
             try:
                 with st.spinner("Searching the archive..."):
-                    result = fetch_past_research(lookup_topic.strip())
-                st.session_state.result = result
-                st.session_state.last_topic = lookup_topic.strip()
+                    run = fetch_completed_case(lookup_id.strip())
+                st.session_state.run = run
+                st.session_state.last_topic = run.get("result", {}).get("topic", "")
                 st.success("File loaded from the archive.")
             except ValueError as e:
                 st.warning(str(e))
@@ -225,9 +279,9 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Every case runs through four agents in order: **Search** finds sources, "
-        "**Read** extracts the most relevant one, **Write** drafts the report, "
-        "**Critique** reviews it for gaps."
+        "Every case runs through **Search**, **Read**, **Write**, and **Critique** "
+        "agents, then pauses for **Human Review** before it's finalized — "
+        "approving may loop back through Write/Critique again if you request changes."
     )
 
 
@@ -242,9 +296,9 @@ st.markdown(
     </div>
     <div class="case-title">Research Desk</div>
     <div class="case-sub">
-        Dispatch a topic below. Four agents build the file in sequence, start to finish.
+        Dispatch a topic below. Agents build the file in sequence, then hand it to you for sign-off.
     </div>
-    <div class="stage-line">01 Search &nbsp;→&nbsp; 02 Read &nbsp;→&nbsp; 03 Write &nbsp;→&nbsp; 04 Critique</div>
+    <div class="stage-line">01 Search &nbsp;→&nbsp; 02 Read &nbsp;→&nbsp; 03 Write &nbsp;→&nbsp; 04 Critique &nbsp;→&nbsp; 05 Your Review</div>
     """,
     unsafe_allow_html=True,
 )
@@ -263,8 +317,8 @@ if submitted:
     else:
         with st.spinner("Agents are working the case... this can take a minute or two."):
             try:
-                result = run_research(topic.strip())
-                st.session_state.result = result
+                run = start_research(topic.strip())
+                st.session_state.run = run
                 st.session_state.last_topic = topic.strip()
             except ValueError as e:
                 st.error(f"The pipeline failed: {e}")
@@ -274,51 +328,147 @@ if submitted:
                     f"Start the FastAPI server and try again.\n\nDetails: {e}"
                 )
 
+
 # ------------------------------------------------------------------
-# Results display
+# Results / review display
 # ------------------------------------------------------------------
-if st.session_state.result:
-    result = st.session_state.result
-    display_topic = html.escape(result.get("topic", st.session_state.last_topic))
+run = st.session_state.run
+
+if run:
+    thread_id = run.get("thread_id", "")
+    status = run.get("status")
+    display_topic = html.escape(st.session_state.last_topic or "Untitled case")
 
     st.divider()
+
+    stamp_class = "pending" if status == "interrupted" else "approved"
+    stamp_text = "Awaiting Review" if status == "interrupted" else "Closed"
+
     st.markdown(
         f"""
-        <div class="case-eyebrow">Case File</div>
-        <div class="case-title" style="font-size: 1.9rem;">{display_topic}</div>
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <div class="case-eyebrow">Case File</div>
+                <div class="case-title" style="font-size: 1.9rem;">{display_topic}</div>
+            </div>
+            <span class="case-stamp {stamp_class}">{stamp_text}</span>
+        </div>
+        <div class="thread-tag">Case ID: <code>{thread_id}</code> — save this to retrieve the case later</div>
         """,
         unsafe_allow_html=True,
     )
 
-    tab_report, tab_feedback, tab_search, tab_scraped = st.tabs(
-        ["📄 Report", "🧐 Critic's Notes", "🔍 Search Log", "📚 Source Extract"]
-    )
+    # ------------------------------------------------------------------
+    # PAUSED: human review needed
+    # ------------------------------------------------------------------
+    if status == "interrupted":
+        pending = run.get("pending_review", {})
+        st.write("")
 
-    with tab_report:
         with st.container(border=True):
-            st.markdown('<span class="section-label">Final Report</span>', unsafe_allow_html=True)
-            st.markdown(result.get("report", "_No report generated._"))
-            st.download_button(
-                "Download as Markdown",
-                data=result.get("report", ""),
-                file_name=f"{st.session_state.last_topic.replace(' ', '_')}_report.md",
-                mime="text/markdown",
+            st.markdown('<span class="section-label">Human Review Needed</span>', unsafe_allow_html=True)
+            st.caption(f"Revision round {pending.get('attempt', 1)} of 3")
+
+            st.markdown("**Critic's feedback:**")
+            st.markdown(pending.get("critic_feedback", "_No critic feedback available._"))
+
+            st.markdown("**Draft report** (edit below if you want to tweak it before approving):")
+            edited_text = st.text_area(
+                "Draft report",
+                value=pending.get("report", ""),
+                height=350,
+                label_visibility="collapsed",
+                key=f"draft_edit_{thread_id}_{pending.get('attempt', 0)}",
             )
 
-    with tab_feedback:
-        with st.container(border=True):
-            st.markdown('<span class="section-label">Critic Review</span>', unsafe_allow_html=True)
-            st.markdown(result.get("feedback", "_No feedback generated._"))
+            revision_notes = st.text_area(
+                "Notes for the writer (only used if you request a revision)",
+                placeholder="e.g. Add more recent statistics on adoption rates, and tighten the conclusion.",
+                key=f"revision_notes_{thread_id}_{pending.get('attempt', 0)}",
+            )
 
-    with tab_search:
-        with st.container(border=True):
-            st.markdown('<span class="section-label">Raw Search Results</span>', unsafe_allow_html=True)
-            st.text(result.get("search_results", "_No search results._"))
+            col_approve, col_revise = st.columns(2)
 
-    with tab_scraped:
-        with st.container(border=True):
-            st.markdown('<span class="section-label">Scraped Source Content</span>', unsafe_allow_html=True)
-            st.text(result.get("scraped_content", "_No scraped content._"))
+            with col_approve:
+                if st.button("✅ Approve & Finalize", use_container_width=True, type="primary"):
+                    with st.spinner("Finalizing the report..."):
+                        try:
+                            # Only send edited_report if the human actually changed it.
+                            edited_report = edited_text if edited_text != pending.get("report", "") else None
+                            new_run = resume_research(thread_id, action="approve", edited_report=edited_report)
+                            st.session_state.run = new_run
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(f"Resume failed: {e}")
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Could not reach backend: {e}")
+
+            with col_revise:
+                if st.button("🔁 Send Back for Revision", use_container_width=True):
+                    with st.spinner("Sending back to the writer..."):
+                        try:
+                            new_run = resume_research(
+                                thread_id,
+                                action="revise",
+                                comments=revision_notes or "Human reviewer requested changes, no specific notes given.",
+                            )
+                            st.session_state.run = new_run
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(f"Resume failed: {e}")
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Could not reach backend: {e}")
+
+    # ------------------------------------------------------------------
+    # COMPLETED: final result
+    # ------------------------------------------------------------------
+    elif status == "completed":
+        result = run.get("result", {}) or {}
+
+        badge = "✅ Approved" if result.get("is_approved") else "⚠️ Ended without approval (max revisions reached)"
+        st.caption(f"{badge} · {result.get('attempts', 0)} revision round(s)")
+
+        tab_report, tab_feedback, tab_search, tab_scraped = st.tabs(
+            ["📄 Report", "🧐 Critic's Notes", "🔍 Search Log", "📚 Source Extract"]
+        )
+
+        with tab_report:
+            with st.container(border=True):
+                st.markdown('<span class="section-label">Final Report</span>', unsafe_allow_html=True)
+                st.markdown(result.get("report") or "_No report generated._")
+                st.download_button(
+                    "Download as Markdown",
+                    data=result.get("report", ""),
+                    file_name=f"{st.session_state.last_topic.replace(' ', '_') or 'report'}_report.md",
+                    mime="text/markdown",
+                )
+
+        with tab_feedback:
+            with st.container(border=True):
+                st.markdown('<span class="section-label">Critic Review</span>', unsafe_allow_html=True)
+                st.markdown(result.get("feedback") or "_No feedback generated._")
+
+        with tab_search:
+            with st.container(border=True):
+                st.markdown('<span class="section-label">Source URLs</span>', unsafe_allow_html=True)
+                urls = result.get("urls") or []
+                if urls:
+                    for url in urls:
+                        st.markdown(f"- {url}")
+                else:
+                    st.text("No search results.")
+
+        with tab_scraped:
+            with st.container(border=True):
+                st.markdown('<span class="section-label">Scraped Source Content</span>', unsafe_allow_html=True)
+                scraped = result.get("scraped_content") or []
+                if scraped:
+                    for i, chunk in enumerate(scraped, start=1):
+                        st.markdown(f"**Source {i}**")
+                        st.text(chunk)
+                        st.markdown("---")
+                else:
+                    st.text("No scraped content.")
 
 else:
     st.divider()
