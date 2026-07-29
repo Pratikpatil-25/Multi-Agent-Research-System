@@ -9,7 +9,7 @@ Run from the `server/` directory with: uvicorn main:app --reload --port 8000
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,16 +50,26 @@ app.add_middleware(
 # ------------------------------------------------------------------
 # Schemas
 # ------------------------------------------------------------------
+# UPDATED: matches state.py's State TypedDict, which has these fields:
+#   topic, messages, attempt, is_approved, urls, scraped_content, report, feedback
+# There is no "search_results" field in State (there never was) - the old
+# version of this file read state.get("search_results", ...), which would
+# always silently return the empty-string default. Fixed to read "urls" and
+# "scraped_content" instead, which are the fields the graph actually fills in.
 class ResearchRequest(BaseModel):
     topic: str = Field(..., min_length=3, description="The research topic to investigate")
 
 
 class ResearchResponse(BaseModel):
     topic: str
-    search_results: str
-    scraped_content: str
-    report: str
-    feedback: str
+    urls: List[str] = Field(default_factory=list, description="Source URLs found by the Search agent")
+    scraped_content: List[str] = Field(
+        default_factory=list, description="Research notes extracted by the Scraper agent, one entry per source"
+    )
+    report: str = Field(default="", description="Final report text produced by the Writer agent")
+    feedback: str = Field(default="", description="Critic agent's most recent review of the report")
+    is_approved: bool = Field(default=False, description="Whether the Critic approved the final report")
+    attempts: int = Field(default=0, description="How many writer/critic revision rounds were used")
 
 
 class HealthResponse(BaseModel):
@@ -71,17 +81,27 @@ class HealthResponse(BaseModel):
 # ------------------------------------------------------------------
 def _to_text(value) -> str:
     """
-    Coerce chain/agent outputs to plain text.
+    Coerce a single value to plain text.
 
-    ASSUMPTION: writer_chain / critic_chain may return LangChain message
-    objects (e.g. AIMessage) rather than raw strings, depending on how
-    they're built in components/agents.py. This safely unwraps `.content`
-    if present, otherwise falls back to str(). Remove this if your chains
-    already return plain strings.
+    ASSUMPTION: some state fields (e.g. "report", "feedback") are already
+    plain strings coming out of nodes.py (extract_draft_node / critic_node),
+    but this stays as a safety net in case a LangChain message object
+    (e.g. AIMessage) ever ends up in one of these fields instead.
     """
     if hasattr(value, "content"):
         return value.content
     return str(value) if value is not None else ""
+
+
+def _to_text_list(values) -> List[str]:
+    """
+    Coerce a list of values (e.g. state["scraped_content"] or state["urls"])
+    to a plain list of strings. Handles the case where an entry is a
+    LangChain message object instead of a raw string.
+    """
+    if not values:
+        return []
+    return [_to_text(v) for v in values]
 
 
 # ------------------------------------------------------------------
@@ -120,10 +140,12 @@ async def run_research(request: ResearchRequest):
 
     response = ResearchResponse(
         topic=topic,
-        search_results=_to_text(state.get("search_results", "")),
-        scraped_content=_to_text(state.get("scraped_content", "")),
+        urls=_to_text_list(state.get("urls", [])),
+        scraped_content=_to_text_list(state.get("scraped_content", [])),
         report=_to_text(state.get("report", "")),
         feedback=_to_text(state.get("feedback", "")),
+        is_approved=bool(state.get("is_approved", False)),
+        attempts=int(state.get("attempt", 0)),
     )
 
     _run_history[topic] = response
