@@ -11,7 +11,7 @@ from components.tools import web_search, scrape_url
 from dotenv import load_dotenv
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import END
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 
 
 load_dotenv()
@@ -332,6 +332,7 @@ def critic_node(state: State) -> dict:
     # line, so we look at that specific line rather than scanning the whole
     # text (scanning the whole text is unreliable - the word "APPROVED" or
     # "REJECTED" can show up again later inside the Issues/Recommendations).
+    
     status_line = review.splitlines()[0].upper() if review else ""
     is_approved = "APPROVED" in status_line and "REJECTED" not in status_line
 
@@ -342,6 +343,38 @@ def critic_node(state: State) -> dict:
     print(f"[Feedback]:\n{feedback}")
 
     return {"feedback": feedback, "is_approved": is_approved}
+
+
+# ---------------------------------------------------------------------------
+# HUMAN-IN-THE-LOOP NODE
+# ---------------------------------------------------------------------------
+def human_review_node(state: State) -> dict:
+    human_response = interrupt(
+        {
+            "message": "Please review this report before it's finalized.",
+            "topic": state["topic"],
+            "report": state["report"],
+            "critic_feedback": state.get("feedback", ""),
+            "attempt": state.get("attempt", 0),
+        }
+    )
+
+    action = human_response.get("action", "approve")
+
+    if action == "approve":
+        edited_report = human_response.get("edited_report")
+        return {
+            "report": edited_report if edited_report else state["report"],
+            "is_approved": True,
+        }
+
+    # action == "revise": send the human's notes back to the Writer as
+    # feedback, same as a critic rejection, so the existing retry loop
+    # (writer -> critic -> human_review) just runs again.
+    return {
+        "feedback": human_response.get("comments", "Human reviewer requested changes."),
+        "is_approved": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +389,15 @@ def should_use_tool(state: State):
 
 
 def should_stop_looping(state: State):
-    if state["is_approved"]:
+    # NOTE: with human-in-the-loop added, this router now runs after
+    # human_review_node (not directly after critic_node). is_approved is set
+    # by human_review_node based on the human's decision - the critic's
+    # score/feedback is just advisory input the human gets to see, it no
+    # longer approves anything automatically.
+    if state.get("is_approved", False):
         print("Report has been approved\n")
         return END
-    if state["attempt"] >= 3:
-        print("Reached max attempts")
+    if state.get("attempt", 0) >= 3:
+        print("Reached max attempts - ending even without human approval")
         return END
     return "writer"

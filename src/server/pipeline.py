@@ -1,5 +1,5 @@
 from graph import app
-def pipeline(topic : str) -> dict :   # this dict is nothing but the state that will be passed from agent to agent
+def build_initial_state(topic : str) -> dict :   # this dict is nothing but the state that will be passed from agent to agent
     state = {
         "topic" : topic,
         "messages" : [],
@@ -11,9 +11,9 @@ def pipeline(topic : str) -> dict :   # this dict is nothing but the state that 
         "feedback" : ""
     }
 
-    final_state = app.invoke(state)
+    
 
-    return final_state 
+    return state 
 
 
 
@@ -88,7 +88,7 @@ def pipeline(topic : str) -> dict :   # this dict is nothing but the state that 
 
 if __name__ == "__main__":
     topic = input("\n Enter the research Topic : ")
-    pipeline(topic)
+    build_initial_state(topic)
 
 
 
