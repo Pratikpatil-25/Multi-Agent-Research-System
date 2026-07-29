@@ -82,12 +82,6 @@ User Research Query
 
 ---
 
-<p align="center">
-  <img src="assets/workflow.png" width="1000">
-</p>
-
----
-
 ## ⚙️ Architecture
 
 ```text
@@ -103,13 +97,13 @@ User Research Query
                              ▼
               ┌──────────────────────────────┐
               │       Search Agent           │
-              │  Tavily Search Tool          │
+              │     Tavily Search Tool       │
               └──────────────┬───────────────┘
                              │
                              ▼
               ┌──────────────────────────────┐
               │      Scraping Agent          │
-              │ BeautifulSoup Tool          │
+              │     BeautifulSoup Tool       │
               └──────────────┬───────────────┘
                              │
                              ▼
